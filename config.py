@@ -55,6 +55,9 @@ class Config:
     min_voice_ms: int
     rms_speech_start: float
     rms_speech_frames: int
+    out_chunk_ms: int
+    playback_buffer_ms: int
+    first_audio_timeout_ms: int
     conversation_session_seconds: int
     debug: bool
     log_level: str
@@ -100,6 +103,9 @@ def load_config(env_path: Optional[Path] = None, require_gemini: bool = True) ->
     min_voice_ms = _get_env_int("MIN_VOICE_MS", 300)
     rms_speech_start = _get_env_float("RMS_SPEECH_START", 80.0)
     rms_speech_frames = _get_env_int("RMS_SPEECH_FRAMES", 2)
+    out_chunk_ms = _get_env_int("OUT_CHUNK_MS", 40)
+    playback_buffer_ms = _get_env_int("PLAYBACK_BUFFER_MS", 250)
+    first_audio_timeout_ms = _get_env_int("FIRST_AUDIO_TIMEOUT_MS", 12000)
     conversation_session_seconds = _get_env_int("CONVERSATION_SESSION_SECONDS", 10)
     debug = _get_env_bool("DEBUG", False)
     log_level = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -132,6 +138,9 @@ def load_config(env_path: Optional[Path] = None, require_gemini: bool = True) ->
         min_voice_ms=min_voice_ms,
         rms_speech_start=rms_speech_start,
         rms_speech_frames=rms_speech_frames,
+        out_chunk_ms=out_chunk_ms,
+        playback_buffer_ms=playback_buffer_ms,
+        first_audio_timeout_ms=first_audio_timeout_ms,
         conversation_session_seconds=conversation_session_seconds,
         debug=debug,
         log_level=log_level,

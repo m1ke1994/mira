@@ -249,48 +249,93 @@ class AssistantRuntime:
                 continue
 
             try:
-                t_send_start = time.time()
-                first_chunk_time = {"t": None}
+                record_end_ts = self.last_record_end
+                send_start_ts = time.time()
+                first_event_ts = {"t": None}
+                first_chunk_ts = {"t": None}
+                playback_start_ts = {"t": None}
+                playback_end_ts = {"t": None}
+
+                def on_first_event() -> None:
+                    if first_event_ts["t"] is None:
+                        first_event_ts["t"] = time.time()
 
                 def on_first_chunk() -> None:
-                    if first_chunk_time["t"] is None:
-                        first_chunk_time["t"] = time.time()
+                    if first_chunk_ts["t"] is None:
+                        first_chunk_ts["t"] = time.time()
 
-                response_stream = self.client.send_audio(audio, on_first_chunk=on_first_chunk)
-                playback_started = False
+                playback_queue: "Queue[Optional[bytes]]" = Queue()
+                prebuffer: list[bytes] = []
+                buffer_bytes = int(self.config.playback_buffer_ms * self.config.output_target_rate * 2 / 1000)
+                buffer_bytes = max(buffer_bytes, 1)
+
+                def playback_worker() -> None:
+                    started = False
+                    while True:
+                        item = playback_queue.get()
+                        if item is None:
+                            break
+                        if not started:
+                            prebuffer.append(item)
+                            if sum(len(b) for b in prebuffer) >= buffer_bytes:
+                                started = True
+                                self._set_state(AssistantState.PLAYING)
+                                if playback_start_ts["t"] is None:
+                                    playback_start_ts["t"] = time.time()
+                                for pb in prebuffer:
+                                    self.player.play_bytes(pb)
+                                prebuffer.clear()
+                        else:
+                            self.player.play_bytes(item)
+                    if not started and prebuffer:
+                        # Not enough to reach buffer threshold but got some audio, play it
+                        self._set_state(AssistantState.PLAYING)
+                        if playback_start_ts["t"] is None:
+                            playback_start_ts["t"] = time.time()
+                        for pb in prebuffer:
+                            self.player.play_bytes(pb)
+                    playback_end_ts["t"] = time.time()
+
+                worker = Thread(target=playback_worker, daemon=True)
+                worker.start()
+
+                response_stream = self.client.send_audio(
+                    audio,
+                    on_first_chunk=on_first_chunk,
+                    on_first_event=on_first_event,
+                    chunk_ms=self.config.out_chunk_ms,
+                    first_audio_timeout_ms=self.config.first_audio_timeout_ms,
+                )
                 received_any = False
                 for chunk in response_stream:
                     if not chunk:
                         continue
                     received_any = True
-                    if not playback_started:
-                        playback_started = True
-                        self._set_state(AssistantState.PLAYING)
-                        t_playback_start = time.time()
-                    self.player.play_bytes(chunk)
-                if not received_any:
-                    logger.warning("No audio chunks received from Gemini")
-                else:
-                    logger.info("Response playback finished")
-                record_to_send_ms = (
-                    (t_send_start - self.last_record_end) * 1000 if self.last_record_end else 0
+                    playback_queue.put(chunk)
+                playback_queue.put(None)
+                worker.join()
+
+                record_to_send_ms = (send_start_ts - record_end_ts) * 1000 if record_end_ts else 0
+                send_to_first_event_ms = (
+                    (first_event_ts["t"] - send_start_ts) * 1000 if first_event_ts["t"] else None
                 )
-                send_to_first_ms = (
-                    (first_chunk_time["t"] - t_send_start) * 1000 if first_chunk_time["t"] else None
+                send_to_first_audio_ms = (
+                    (first_chunk_ts["t"] - send_start_ts) * 1000 if first_chunk_ts["t"] else None
                 )
-                first_to_play_ms = (
-                    (t_playback_start - first_chunk_time["t"]) * 1000
-                    if first_chunk_time["t"] and playback_started
+                first_audio_to_play_ms = (
+                    (playback_start_ts["t"] - first_chunk_ts["t"]) * 1000
+                    if first_chunk_ts["t"] and playback_start_ts["t"]
                     else None
                 )
                 logger.info(
-                    "timing_ms record_to_send=%s send_to_first=%s first_to_play=%s",
+                    "timing_ms record_to_send=%s send_to_first_event=%s send_to_first_audio=%s first_audio_to_play=%s",
                     int(record_to_send_ms),
-                    int(send_to_first_ms) if send_to_first_ms is not None else "n/a",
-                    int(first_to_play_ms) if first_to_play_ms is not None else "n/a",
+                    int(send_to_first_event_ms) if send_to_first_event_ms is not None else "n/a",
+                    int(send_to_first_audio_ms) if send_to_first_audio_ms is not None else "n/a",
+                    int(first_audio_to_play_ms) if first_audio_to_play_ms is not None else "n/a",
                 )
-                if send_to_first_ms and send_to_first_ms > 4000:
-                    logger.warning("Slow first audio chunk from Gemini: %.0f ms", send_to_first_ms)
+                if send_to_first_audio_ms and send_to_first_audio_ms > 4000:
+                    logger.warning("Slow first audio chunk from Gemini: %.0f ms", send_to_first_audio_ms)
                 if self.config.conversation_session_seconds > 0:
                     self.grace_until = time.time() + self.config.conversation_session_seconds
                     self._set_state(
