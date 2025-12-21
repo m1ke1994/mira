@@ -1,10 +1,12 @@
 import logging
 import signal
 import time
-import numpy as np
+from datetime import datetime
 from enum import Enum
 from queue import Empty, Queue
 from threading import Event, Lock, Thread
+
+import numpy as np
 
 from audio_io import (
     AudioPlayer,
@@ -18,6 +20,9 @@ from audio_io import (
 )
 from config import Config, load_config, setup_logging
 from gemini_native_audio import GeminiNativeAudioClient
+from alarms.intent_router import IntentRouter
+from alarms.manager import AlarmManager
+from alarms.sounds import AlarmSoundPlayer, LocalSpeaker
 from vad import EnergyVAD
 from wakeword import PorcupineDetector, init_wakeword_detector
 
@@ -84,8 +89,26 @@ class AssistantRuntime:
         self._grace_logged = False
         self._grace_beeped = False
         self.last_record_end = time.time()
+        self._tzinfo = datetime.now().astimezone().tzinfo
+
+        self.alarm_sound_player = AlarmSoundPlayer(config.alarm_sound_path)
+        self.alarm_manager = AlarmManager(
+            storage_path=config.alarms_path,
+            sound_player=self.alarm_sound_player,
+            check_interval=max(0.2, config.alarm_check_interval_ms / 1000.0),
+            default_snooze_minutes=config.alarm_default_snooze_min,
+            on_alarm_triggered=self._on_alarm_triggered,
+            timezone=self._tzinfo,
+        )
+        self.local_speaker = LocalSpeaker()
+        self.intent_router = IntentRouter(
+            alarm_manager=self.alarm_manager,
+            transcribe_fn=self._transcribe_for_intents if config.enable_alarm_router else None,
+            default_snooze_minutes=config.alarm_default_snooze_min,
+        )
 
     def start(self) -> None:
+        self.alarm_manager.start()
         self.listener_thread = Thread(target=self._listen_loop, name="listener", daemon=True)
         self.worker_thread = Thread(target=self._process_loop, name="processor", daemon=True)
         self.listener_thread.start()
@@ -97,6 +120,7 @@ class AssistantRuntime:
             self.listener_thread.join(timeout=2)
         if self.worker_thread:
             self.worker_thread.join(timeout=2)
+        self.alarm_manager.shutdown()
         self.player.close()
         self.pa.terminate()
 
@@ -249,6 +273,28 @@ class AssistantRuntime:
                 continue
 
             try:
+                now_dt = datetime.now(self._tzinfo)
+                if self.intent_router:
+                    local_intent = self.intent_router.handle_audio(audio, now=now_dt)
+                    if local_intent and local_intent.handled:
+                        if local_intent.response_text:
+                            self._respond_local_text(local_intent.response_text)
+                        self._grace_beeped = False
+                        if self.config.conversation_session_seconds > 0:
+                            self.grace_until = time.time() + self.config.conversation_session_seconds
+                            self._set_state(
+                                AssistantState.GRACE_WINDOW if self.wakeword_detector else AssistantState.RECORDING_QUERY
+                            )
+                            self._grace_logged = False
+                            self._grace_beeped = False
+                        else:
+                            self._set_state(
+                                AssistantState.IDLE_LISTENING
+                                if self.wakeword_detector
+                                else AssistantState.RECORDING_QUERY
+                            )
+                        continue
+
                 record_end_ts = self.last_record_end
                 send_start_ts = time.time()
                 first_event_ts = {"t": None}
@@ -395,6 +441,33 @@ class AssistantRuntime:
         )
         return False
 
+    def _respond_local_text(self, text: str, allow_beep: bool = True) -> None:
+        logger.info("Local response: %s", text)
+        spoken = False
+        if self.local_speaker and self.local_speaker.available:
+            spoken = self.local_speaker.speak_async(text)
+        if not spoken and allow_beep:
+            beep()
+
+    def _transcribe_for_intents(self, audio_pcm: bytes) -> str | None:
+        try:
+            return self.client.transcribe_text(
+                audio_pcm,
+                model=self.config.alarm_transcribe_model,
+                prompt="Распознай голосовую команду пользователя и верни только текст без комментариев.",
+            )
+        except Exception as exc:
+            logger.error("Intent transcription failed: %s", exc)
+            return None
+
+    def _on_alarm_triggered(self, alarm) -> None:
+        try:
+            when = alarm.fire_at.astimezone(self._tzinfo).strftime("%H:%M")
+        except Exception:
+            when = "сейчас"
+        message = f"Саша, будильник! {when}."
+        self._respond_local_text(message, allow_beep=False)
+
 
 def main() -> None:
     config = load_config()
@@ -427,6 +500,9 @@ def main() -> None:
         output_sample_rate=config.output_target_rate,
         lang=config.lang,
     )
+
+    if config.enable_alarm_router:
+        logger.info("Alarm router enabled (storage=%s)", config.alarms_path)
 
     runtime = AssistantRuntime(config, pa, device, player, client, vad, wakeword_detector)
     runtime.start()

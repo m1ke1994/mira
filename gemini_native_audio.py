@@ -118,3 +118,35 @@ class GeminiNativeAudioClient:
             yield chunk
         if not received_any:
             logger.warning("No audio received from Gemini response stream")
+
+    def transcribe_text(
+        self,
+        audio_pcm: bytes,
+        model: str,
+        prompt: str | None = None,
+    ) -> Optional[str]:
+        mime_type = f"audio/pcm;rate={self.input_sample_rate}"
+        user_prompt = prompt or "Расшифруй речь пользователя и верни только текст."
+        try:
+            response = self.client.models.generate_content(
+                model=model,
+                contents=[
+                    types.Content(
+                        role="user",
+                        parts=[
+                            types.Part.from_bytes(audio_pcm, mime_type=mime_type),
+                            types.Part.from_text(user_prompt),
+                        ],
+                    )
+                ],
+                config=types.GenerateContentConfig(
+                    response_mime_type="text/plain",
+                    temperature=0.0,
+                    top_p=0.1,
+                ),
+            )
+        except Exception as exc:  # pragma: no cover - transport failures
+            logger.error("Failed to transcribe audio via Gemini: %s", exc)
+            return None
+        text = getattr(response, "text", None)
+        return text.strip() if text else None

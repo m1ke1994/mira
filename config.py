@@ -66,6 +66,12 @@ class Config:
     wakeword_sensitivity: float
     picovoice_access_key: Optional[str]
     vad_threshold: float
+    alarms_path: Path
+    alarm_sound_path: Path
+    alarm_check_interval_ms: int
+    alarm_default_snooze_min: int
+    enable_alarm_router: bool
+    alarm_transcribe_model: str
 
 
 DEFAULT_SYSTEM_PROMPT = (
@@ -111,6 +117,12 @@ def load_config(env_path: Optional[Path] = None, require_gemini: bool = True) ->
     log_level = os.getenv("LOG_LEVEL", "INFO").upper()
     lang = os.getenv("LANG", "ru")
     vad_threshold = _get_env_float("VAD_THRESHOLD", 80.0)
+    alarms_path = Path(os.getenv("ALARM_STORAGE_PATH", "data/alarms.json"))
+    alarm_sound_path = Path(os.getenv("ALARM_SOUND_PATH", "data/alarm.wav"))
+    alarm_check_interval_ms = _get_env_int("ALARM_CHECK_INTERVAL_MS", 800)
+    alarm_default_snooze_min = _get_env_int("ALARM_DEFAULT_SNOOZE_MIN", 5)
+    enable_alarm_router = _get_env_bool("ENABLE_ALARM_ROUTER", True)
+    alarm_transcribe_model = os.getenv("ALARM_TRANSCRIBE_MODEL", "gemini-1.5-flash")
 
     wakeword_keyword_env = os.getenv("WAKEWORD_KEYWORD_PATH")
     wakeword_keyword_path = Path(wakeword_keyword_env) if wakeword_keyword_env else None
@@ -149,6 +161,12 @@ def load_config(env_path: Optional[Path] = None, require_gemini: bool = True) ->
         wakeword_sensitivity=wakeword_sensitivity,
         picovoice_access_key=picovoice_access_key,
         vad_threshold=vad_threshold,
+        alarms_path=alarms_path,
+        alarm_sound_path=alarm_sound_path,
+        alarm_check_interval_ms=alarm_check_interval_ms,
+        alarm_default_snooze_min=alarm_default_snooze_min,
+        enable_alarm_router=enable_alarm_router,
+        alarm_transcribe_model=alarm_transcribe_model,
     )
 
 
